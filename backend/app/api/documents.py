@@ -3,7 +3,14 @@ from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
-from app.services.ai_service import summarize_document
+from app.models.extraction import ExtractionRequest, ExtractionResponse
+from app.models.question import QuestionRequest, QuestionResponse
+from app.services.ai_service import (
+    USE_MOCK_AI,
+    answer_document_question,
+    extract_document_data,
+    summarize_document,
+)
 from app.services.document_service import extract_document_text
 
 
@@ -18,9 +25,52 @@ UPLOAD_DIRECTORY.mkdir(exist_ok=True)
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 MAX_FILE_SIZE = 10 * 1024 * 1024
 MAX_SUMMARY_CHARACTERS = 30_000
+MAX_EXTRACTION_CHARACTERS = 50_000
+MAX_QUESTION_CONTEXT_CHARACTERS = 50_000
 
 
-@router.post("/upload", status_code=status.HTTP_201_CREATED)
+def find_uploaded_document(document_id: str) -> Path:
+    matching_files = list(
+        UPLOAD_DIRECTORY.glob(f"{document_id}.*")
+    )
+
+    if not matching_files:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document was not found.",
+        )
+
+    if len(matching_files) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Multiple files were found for this document ID.",
+        )
+
+    return matching_files[0]
+
+
+def read_uploaded_document(file_path: Path) -> str:
+    try:
+        document_text = extract_document_text(file_path)
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unable to read the document: {error}",
+        ) from error
+
+    if not document_text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No readable text was found in the document.",
+        )
+
+    return document_text
+
+
+@router.post(
+    "/upload",
+    status_code=status.HTTP_201_CREATED,
+)
 async def upload_document(
     file: UploadFile = File(...),
 ) -> dict[str, str]:
@@ -51,7 +101,13 @@ async def upload_document(
     stored_filename = f"{document_id}{extension}"
     file_path = UPLOAD_DIRECTORY / stored_filename
 
-    file_path.write_bytes(file_content)
+    try:
+        file_path.write_bytes(file_content)
+    except OSError as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to save the uploaded document.",
+        ) from error
 
     try:
         extracted_text = extract_document_text(file_path)
@@ -84,37 +140,8 @@ async def upload_document(
 async def summarize_uploaded_document(
     document_id: str,
 ) -> dict[str, str]:
-    matching_files = list(
-        UPLOAD_DIRECTORY.glob(f"{document_id}.*")
-    )
-
-    if not matching_files:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document was not found.",
-        )
-
-    if len(matching_files) > 1:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Multiple files were found for this document ID.",
-        )
-
-    file_path = matching_files[0]
-
-    try:
-        document_text = extract_document_text(file_path)
-    except Exception as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unable to read the document: {error}",
-        ) from error
-
-    if not document_text.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="No readable text was found in the document.",
-        )
+    file_path = find_uploaded_document(document_id)
+    document_text = read_uploaded_document(file_path)
 
     text_for_summary = document_text[:MAX_SUMMARY_CHARACTERS]
 
@@ -136,3 +163,92 @@ async def summarize_uploaded_document(
         "stored_filename": file_path.name,
         "summary": summary,
     }
+
+
+@router.post(
+    "/{document_id}/extract",
+    response_model=ExtractionResponse,
+)
+async def extract_uploaded_document(
+    document_id: str,
+    request: ExtractionRequest,
+) -> ExtractionResponse:
+    file_path = find_uploaded_document(document_id)
+    document_text = read_uploaded_document(file_path)
+
+    text_for_extraction = document_text[:MAX_EXTRACTION_CHARACTERS]
+
+    try:
+        extraction = extract_document_data(
+            document_text=text_for_extraction,
+            extraction_instructions=request.extraction_instructions,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI structured extraction failed: {error}",
+        ) from error
+
+    if len(document_text) > MAX_EXTRACTION_CHARACTERS:
+        extraction.warnings.append(
+            "The document was truncated before AI extraction because it "
+            "exceeded the current processing limit."
+        )
+
+    return ExtractionResponse(
+        document_id=document_id,
+        stored_filename=file_path.name,
+        extraction=extraction,
+        mock_mode=USE_MOCK_AI,
+    )
+
+
+@router.post(
+    "/{document_id}/questions",
+    response_model=QuestionResponse,
+)
+async def ask_document_question(
+    document_id: str,
+    request: QuestionRequest,
+) -> QuestionResponse:
+    file_path = find_uploaded_document(document_id)
+    document_text = read_uploaded_document(file_path)
+
+    document_context = document_text[
+        :MAX_QUESTION_CONTEXT_CHARACTERS
+    ]
+
+    try:
+        result = answer_document_question(
+            document_text=document_context,
+            question=request.question,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI document question failed: {error}",
+        ) from error
+
+    if len(document_text) > MAX_QUESTION_CONTEXT_CHARACTERS:
+        result.answer += (
+            " The document exceeded the current processing limit, so only "
+            "the first part of the document was analyzed."
+        )
+
+    return QuestionResponse(
+        document_id=document_id,
+        stored_filename=file_path.name,
+        question=request.question,
+        result=result,
+        mock_mode=USE_MOCK_AI,
+    )
