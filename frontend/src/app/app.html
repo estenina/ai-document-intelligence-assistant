@@ -1,0 +1,390 @@
+<main class="page-container">
+
+  <!-- Header -->
+  <header class="header">
+
+    <!-- Animated AI Visual -->
+    <div class="ai-visual">
+
+      <div class="ai-glow"></div>
+
+      <div class="ai-orbit ai-orbit-one"></div>
+      <div class="ai-orbit ai-orbit-two"></div>
+
+      <div class="ai-core">
+        <span class="ai-spark">
+          ✦
+        </span>
+      </div>
+
+      <!-- AI Introduction -->
+      <div class="ai-tooltip">
+
+        <strong>
+          Hi! I’m your Document AI ✦
+        </strong>
+
+        <span>
+          Upload a document and I’ll help you understand it.
+        </span>
+
+      </div>
+
+    </div>
+
+
+    <h1>
+      AI Document Intelligence
+    </h1>
+
+    <p>
+      Upload, understand, and ask questions about your documents.
+    </p>
+
+  </header>
+
+
+  <!-- Upload Card -->
+  <section class="upload-card">
+
+    <h2>
+      Upload a document
+    </h2>
+
+    <div class="upload-area">
+
+      <div class="upload-icon">
+        📄
+      </div>
+
+      <p class="upload-title">
+        Choose a document to analyze
+      </p>
+
+      <p class="upload-info">
+        PDF, DOCX or TXT • Maximum 10 MB
+      </p>
+
+
+      <input
+        #fileInput
+        type="file"
+        accept=".pdf,.docx,.txt"
+        hidden
+        (change)="onFileSelected($event)"
+      >
+
+
+      <button
+        type="button"
+        (click)="fileInput.click()"
+        [disabled]="isUploading() || isGeneratingSummary()"
+      >
+        Choose File
+      </button>
+
+
+      @if (selectedFile()) {
+
+        <p class="selected-file">
+          Selected: {{ selectedFile()?.name }}
+        </p>
+
+
+        <button
+          type="button"
+          class="analyze-button"
+          (click)="uploadDocument()"
+          [disabled]="
+            isUploading() ||
+            isGeneratingSummary() ||
+            documentId() !== null
+          "
+        >
+
+          @if (isUploading()) {
+
+            <span class="spinner"></span>
+            Uploading...
+
+          } @else if (isGeneratingSummary()) {
+
+            <span class="spinner"></span>
+            Analyzing...
+
+          } @else if (documentId()) {
+
+            <span class="button-checkmark">
+              ✓
+            </span>
+
+            Analyzed
+
+          } @else {
+
+            Upload & Analyze
+
+          }
+
+        </button>
+
+      }
+
+
+      <!-- Success Status -->
+      @if (uploadMessage() && documentId()) {
+
+        <div class="success-message">
+
+          <span class="success-checkmark">
+            ✓
+          </span>
+
+          <div class="success-text">
+
+            <strong>
+              Document uploaded successfully
+            </strong>
+
+            <span>
+              Your document is ready for AI analysis.
+            </span>
+
+          </div>
+
+        </div>
+
+      }
+
+    </div>
+
+  </section>
+
+
+  <!-- Error Message -->
+  @if (errorMessage()) {
+
+    <div class="error-message">
+
+      <span class="error-icon">
+        !
+      </span>
+
+      <span>
+        {{ errorMessage() }}
+      </span>
+
+    </div>
+
+  }
+
+
+  <!-- Document Summary -->
+  @if (isGeneratingSummary() || summary()) {
+
+    <section class="summary-card">
+
+      <div class="summary-header">
+
+        <div>
+
+          <p class="section-label">
+            AI ANALYSIS
+          </p>
+
+          <h2>
+            Document Summary
+          </h2>
+
+        </div>
+
+
+        @if (summary() && !isGeneratingSummary()) {
+
+          <span class="summary-status">
+
+            <span class="status-check">
+              ✓
+            </span>
+
+            Complete
+
+          </span>
+
+        }
+
+      </div>
+
+
+      @if (isGeneratingSummary()) {
+
+        <div class="summary-loading">
+
+          <span class="spinner spinner-blue"></span>
+
+          <div>
+
+            <strong>
+              Analyzing your document
+            </strong>
+
+            <p>
+              AI is generating a summary...
+            </p>
+
+          </div>
+
+        </div>
+
+      } @else {
+
+        <div class="summary-content">
+          {{ summary() }}
+        </div>
+
+      }
+
+    </section>
+
+  }
+
+
+  <!-- Ask AI -->
+  @if (documentId() && !isGeneratingSummary()) {
+
+    <section class="question-card">
+
+      <h2>
+        Ask AI About This Document
+      </h2>
+
+      <p class="question-description">
+        Ask a question and get an answer grounded in your uploaded document.
+      </p>
+
+
+      <div class="question-form">
+
+        <input
+          type="text"
+          placeholder="Ask a question about your document..."
+          [(ngModel)]="question"
+          (keyup.enter)="askQuestion()"
+          [disabled]="isThinking()"
+        >
+
+
+        <button
+          type="button"
+          (click)="askQuestion()"
+          [disabled]="isThinking() || !question.trim()"
+        >
+
+          @if (isThinking()) {
+
+            <span class="spinner"></span>
+            Thinking...
+
+          } @else {
+
+            Ask AI
+
+          }
+
+        </button>
+
+      </div>
+
+
+      <!-- Thinking State -->
+      @if (isThinking()) {
+
+        <div class="answer-section">
+
+          <div class="thinking-state">
+
+            <span class="spinner spinner-blue"></span>
+
+            <div>
+
+              <h3>
+                AI is thinking
+              </h3>
+
+              <p>
+                Searching your document for the best answer...
+              </p>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      }
+
+
+      <!-- AI Answer -->
+      @if (answer() && !isThinking()) {
+
+        <div class="answer-section">
+
+          <p class="section-label">
+            AI RESPONSE
+          </p>
+
+          <h3>
+            AI Answer
+          </h3>
+
+          <p class="answer-text">
+            {{ answer() }}
+          </p>
+
+
+          @if (foundInDocument()) {
+
+            <p class="found-in-document">
+              ✓ Answer found in document
+            </p>
+
+          }
+
+
+          @if (citations().length > 0) {
+
+            <div class="sources-section">
+
+              <h4>
+                Supporting Sources
+              </h4>
+
+
+              @for (
+                citation of citations();
+                track $index
+              ) {
+
+                <div class="source-item">
+
+                  <p>
+                    {{ citation.source_text }}
+                  </p>
+
+                </div>
+
+              }
+
+            </div>
+
+          }
+
+        </div>
+
+      }
+
+    </section>
+
+  }
+
+</main>

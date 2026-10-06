@@ -5,6 +5,8 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app.models.extraction import ExtractionRequest, ExtractionResponse
 from app.models.question import QuestionRequest, QuestionResponse
+from app.models.search import MultiDocumentQuestionRequest, MultiDocumentQuestionResponse
+from app.services import document_store
 from app.services.ai_service import (
     USE_MOCK_AI,
     answer_document_question,
@@ -12,6 +14,7 @@ from app.services.ai_service import (
     summarize_document,
 )
 from app.services.document_service import extract_document_text
+from app.services.search_service import answer_multi_document_question
 
 
 router = APIRouter(
@@ -127,13 +130,121 @@ async def upload_document(
             detail="No readable text was found in the document.",
         )
 
+    metadata = document_store.save_document_metadata(
+        UPLOAD_DIRECTORY,
+        document_id=document_id,
+        original_filename=original_filename,
+        stored_filename=stored_filename,
+    )
+
     return {
         "document_id": document_id,
         "original_filename": original_filename,
         "stored_filename": stored_filename,
+        "uploaded_at": metadata["uploaded_at"],
         "message": "Document uploaded and processed successfully.",
         "text_preview": extracted_text[:500],
     }
+
+
+@router.get("")
+async def list_documents() -> list[dict[str, str]]:
+    all_metadata = document_store.load_all_metadata(UPLOAD_DIRECTORY)
+
+    return sorted(
+        (
+            {
+                "document_id": entry["document_id"],
+                "original_filename": entry["original_filename"],
+                "stored_filename": entry["stored_filename"],
+                "uploaded_at": entry["uploaded_at"],
+            }
+            for entry in all_metadata.values()
+            if (UPLOAD_DIRECTORY / entry["stored_filename"]).exists()
+        ),
+        key=lambda item: item["uploaded_at"],
+        reverse=True,
+    )
+
+
+@router.post("/search", response_model=MultiDocumentQuestionResponse)
+async def search_documents(
+    request: MultiDocumentQuestionRequest,
+) -> MultiDocumentQuestionResponse:
+    all_metadata = document_store.load_all_metadata(UPLOAD_DIRECTORY)
+
+    if request.document_ids:
+        missing_ids = [
+            document_id
+            for document_id in request.document_ids
+            if document_id not in all_metadata
+        ]
+
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document(s) not found: {', '.join(missing_ids)}",
+            )
+
+        selected_metadata = [
+            all_metadata[document_id] for document_id in request.document_ids
+        ]
+    else:
+        selected_metadata = list(all_metadata.values())
+
+    if not selected_metadata:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No documents have been uploaded yet.",
+        )
+
+    documents: list[tuple[str, str, Path, str]] = []
+
+    for entry in selected_metadata:
+        file_path = UPLOAD_DIRECTORY / entry["stored_filename"]
+
+        if not file_path.exists():
+            continue
+
+        document_text = read_uploaded_document(file_path)
+
+        documents.append(
+            (
+                entry["document_id"],
+                entry["original_filename"],
+                file_path,
+                document_text,
+            )
+        )
+
+    if not documents:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="None of the requested documents could be read.",
+        )
+
+    try:
+        result = answer_multi_document_question(
+            question=request.question,
+            documents=documents,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI multi-document search failed: {error}",
+        ) from error
+
+    return MultiDocumentQuestionResponse(
+        question=request.question,
+        documents_searched=len(documents),
+        result=result,
+        mock_mode=USE_MOCK_AI,
+    )
 
 
 @router.post("/{document_id}/summarize")
